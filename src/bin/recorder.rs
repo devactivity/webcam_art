@@ -3,7 +3,6 @@ use env_logger::Builder;
 use log::LevelFilter;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use lazy_static::lazy_static;
 use opus::{Channels, Encoder as OpusEncoder};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
@@ -14,8 +13,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use opencv::{
-    core::{Size, Vector},
-    imgcodecs, imgproc,
+    core::Size,
+    imgproc,
     prelude::*,
     videoio::{VideoCapture, VideoWriter, CAP_ANY},
 };
@@ -28,7 +27,6 @@ use ratatui::{
 };
 
 use std::{
-    collections::HashMap,
     env,
     fs::File,
     io::{self, Write},
@@ -41,18 +39,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-lazy_static! {
-    static ref ASCII_CHARS: Vec<char> = vec![' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-    static ref CHAR_LUMINANCE: HashMap<char, f32> = {
-        let mut map = HashMap::new();
-        for (i, &c) in ASCII_CHARS.iter().enumerate() {
-            map.insert(c, i as f32 / (ASCII_CHARS.len() - 1) as f32);
-        }
-
-        map
-    };
-}
-
+const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 const TARGET_FPS: u64 = 30;
 const FPS: f64 = 30.0;
 const SAMPLE_RATE: u32 = 48000;
@@ -62,20 +49,14 @@ struct App {
     ascii_frame: String,
     fps: f64,
     is_recording: bool,
-    term_width: usize,
-    term_height: usize,
-    save_message: Option<(String, Instant)>,
 }
 
 impl App {
-    fn new(term_width: usize, term_height: usize) -> Self {
+    fn new() -> Self {
         App {
             ascii_frame: String::new(),
             fps: 0.0,
             is_recording: false,
-            term_width,
-            term_height,
-            save_message: None,
         }
     }
 
@@ -84,20 +65,16 @@ impl App {
 
         Ok(())
     }
-
-    fn set_save_message(&mut self, message: String) {
-        self.save_message = Some((message, Instant::now()));
-    }
-
-    fn clear_save_message(&mut self) {
-        self.save_message = None;
-    }
 }
 
 fn get_ascii_char(value: u8) -> char {
-    let normalized_value = value as f32 / 255.0;
+    let index = (value as usize * (ASCII_CHARS.len() - 1)) / 255;
 
-    ASCII_CHARS[((ASCII_CHARS.len() - 1) as f32 * normalized_value).round() as usize]
+    if index < ASCII_CHARS.len() {
+        ASCII_CHARS[index]
+    } else {
+        ASCII_CHARS[ASCII_CHARS.len() - 1]
+    }
 }
 
 fn process_frame(frame: &Mat) -> String {
@@ -138,21 +115,6 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn normalize_ascii(ascii: &str, width: usize) -> String {
-    ascii
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_end();
-            if trimmed.len() >= width {
-                trimmed[..width].to_string()
-            } else {
-                format!("{:<width$}", trimmed)
-            }
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
-}
-
 fn render_ascii_frame(ascii: &str, size: Size) -> Result<Mat> {
     let mut img =
         Mat::new_size_with_default(size, opencv::core::CV_8UC3, opencv::core::Scalar::all(0.0))?;
@@ -160,20 +122,17 @@ fn render_ascii_frame(ascii: &str, size: Size) -> Result<Mat> {
     let font_scale = 0.4;
     let thickness = 1;
     let color = opencv::core::Scalar::new(255.0, 255.0, 255.0, 0.0);
-    let line_type = imgproc::LINE_AA;
-
-    let line_height = 10;
 
     for (i, line) in ascii.lines().enumerate() {
         imgproc::put_text(
             &mut img,
             line,
-            opencv::core::Point::new(0, (i as i32 + 1) * line_height),
+            opencv::core::Point::new(0, (i as i32 + 1) * 10),
             font,
             font_scale,
             color,
             thickness,
-            line_type,
+            imgproc::LINE_8,
             false,
         )?;
     }
@@ -284,21 +243,6 @@ fn start_recording(camera: Arc<Mutex<VideoCapture>>, is_recording: Arc<AtomicBoo
     Ok(())
 }
 
-fn save_ascii_image(ascii: &str, width: usize, filename: &str) -> Result<()> {
-    let normalized_ascii = normalize_ascii(ascii, width);
-    let lines: Vec<&str> = normalized_ascii.lines().collect();
-    let height = lines.len();
-
-    let char_width = 10;
-    let char_height = 15;
-    let size = Size::new((width * char_width) as i32, (height * char_height) as i32);
-
-    let img = render_ascii_frame(&normalized_ascii, size)?;
-    imgcodecs::imwrite(filename, &img, &Vector::new())?;
-
-    Ok(())
-}
-
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -355,19 +299,7 @@ fn run_app<B: ratatui::backend::Backend>(
             } else {
                 "Not Recording"
             };
-
-            let mut stats_text = format!(
-                "FPS: {:.2} | Status: {} | Press 'c' to capture image",
-                app.fps, status
-            );
-
-            if let Some((message, time)) = &app.save_message {
-                if time.elapsed() < Duration::from_secs(5) {
-                    stats_text = format!("{} | {}", stats_text, message);
-                } else {
-                    app.clear_save_message();
-                }
-            }
+            let stats_text = format!("FPS: {:.2} | Status: {}", app.fps, status);
             let stats_paragraph = Paragraph::new(stats_text)
                 .style(Style::default().fg(Color::Cyan))
                 .block(Block::default().borders(Borders::ALL).title("Stats"));
@@ -435,21 +367,6 @@ fn run_app<B: ratatui::backend::Backend>(
                             }
                         }
                     }
-                    KeyCode::Char('c') => {
-                        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                        let filename = format!("ascii_capture_{}.png", timestamp);
-
-                        match save_ascii_image(&app.ascii_frame, app.term_width, &filename) {
-                            Ok(_) => {
-                                log::info!("ascii image saved as {}", filename);
-                                app.set_save_message(format!("image saved as {}", filename));
-                            }
-                            Err(e) => {
-                                log::info!("failed to save ascii image: {:?}", e);
-                                app.set_save_message(format!("failed to save image: {:?}", e));
-                            }
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -498,10 +415,7 @@ fn main() -> Result<()> {
 
     // initialize camera
     let camera = Arc::new(Mutex::new(VideoCapture::new(0, CAP_ANY)?));
-    let size = terminal.size()?;
-    let term_width = size.width as usize;
-    let term_height = size.height as usize;
-    let mut app = App::new(term_width, term_height);
+    let mut app = App::new();
 
     let res = run_app(&mut terminal, &mut app, camera.clone());
 
